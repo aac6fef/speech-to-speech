@@ -38,6 +38,8 @@ class OpenApiModelHandler(BaseHandler):
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
     ):
+        self.memory = {"memory":"","chats":""}
+        self.init_chat_prompt = init_chat_prompt
         self.model_name = model_name
         self.stream = stream
         self.chat = Chat(chat_size)
@@ -57,7 +59,7 @@ class OpenApiModelHandler(BaseHandler):
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant"},
+                {"role": "system", "content": self.init_chat_prompt},
                 {"role": "user", "content": "Hello"},
             ],
             stream=self.stream
@@ -66,24 +68,63 @@ class OpenApiModelHandler(BaseHandler):
         logger.info(
             f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s"
         )
+
+    def generate_memory(self):
+        chat_content = self.memory["chats"]
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": "这是你之前和用户的对话,请总结这些对话,以便保存下来成为你的记忆"},
+                {"role": "user", "content": chat_content},
+            ],
+            stream=False
+        )
+        summary = response.choices[0].message.content.strip()
+        return summary
+
+    def compress_memory(self):
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": "这是你的记忆内容,请总结这些内容,以便保存记忆"},
+                {"role": "user", "content": self.memory["memory"]},
+            ],
+            stream=False
+        )
+        compressed_memory = response.choices[0].message.content.strip()
+        return compressed_memory
+
     def process(self, prompt):
             logger.debug("call api language model...")
-            self.chat.append({"role": self.user_role, "content": prompt})
+            if(len(self.memory["chats"])>1000):
+                logger.info("Memorizing Chats")
+                self.memory["memory"] = self.generate_memory()
+                self.memory["memory"] = ""
+            # TODO 不是只靠长度判定,始终传递最近三条
+            if(len(self.memory["memory"])>2000):
+                logger.info("Compressing Memory")
+                self.memory["memory"] = self.compress_memory
 
+            self.chat.append({"role": self.user_role, "content": prompt})
             language_code = None
             if isinstance(prompt, tuple):
-                prompt, language_code = prompt
+                prompt, language_code =  prompt
                 if language_code[-5:] == "-auto":
                     language_code = language_code[:-5]
-                    prompt = f"Please reply to my message in {WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}. " + prompt
-            
+            prompt_to_send = f"##你的记忆\n\n{ self.memory['memory'] }\n##之前的对话\n\n{ self.memory['chats'] }\n##你现在需要回答的问题\n\n{prompt}"
+            self.memory["chats"] += f"USER:{prompt}\n"
+            logger.info(f"Current prompt:{prompt_to_send}")
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": self.user_role, "content": prompt},
+                    {"role": "system", "content": self.init_chat_prompt},
+                    {"role": self.user_role, "content": prompt_to_send}
                 ],
                 stream=self.stream
             )
+
+
+
             if self.stream:
                 generated_text, printable_text = "", ""
                 for chunk in response:
@@ -96,9 +137,11 @@ class OpenApiModelHandler(BaseHandler):
                         printable_text = new_text
                 self.chat.append({"role": "assistant", "content": generated_text})
                 # don't forget last sentence
+                self.memory["chats"] += f"YOU:{generated_text}\n"
                 yield printable_text, language_code
             else:
                 generated_text = response.choices[0].message.content
                 self.chat.append({"role": "assistant", "content": generated_text})
+                self.memory["chats"] += f"YOU:{generated_text}\n"
                 yield generated_text, language_code
 
