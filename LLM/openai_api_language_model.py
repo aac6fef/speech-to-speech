@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime
 
 from nltk import sent_tokenize
 from rich.console import Console
@@ -7,6 +8,7 @@ from openai import OpenAI
 
 from baseHandler import BaseHandler
 from LLM.chat import Chat
+from LLM.api_handler import APIHandler
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ class OpenApiModelHandler(BaseHandler):
         chat_size=1,
         init_chat_role="system",
         init_chat_prompt="You are a helpful AI assistant.",
+        api_port=5000
     ):
         self.memory = {"memory":"","chats":""}
         self.init_chat_prompt = init_chat_prompt
@@ -52,6 +55,8 @@ class OpenApiModelHandler(BaseHandler):
         self.user_role = user_role
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.warmup()
+        self.api_handler = APIHandler(port=api_port)
+        self.api_handler.start()
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -95,53 +100,60 @@ class OpenApiModelHandler(BaseHandler):
         return compressed_memory
 
     def process(self, prompt):
-            logger.debug("call api language model...")
-            if(len(self.memory["chats"])>1000):
-                logger.info("Memorizing Chats")
-                self.memory["memory"] = self.generate_memory()
-                self.memory["memory"] = ""
-            # TODO 不是只靠长度判定,始终传递最近三条
-            if(len(self.memory["memory"])>2000):
-                logger.info("Compressing Memory")
-                self.memory["memory"] = self.compress_memory
+        logger.debug("call api language model...")
+        
+        # 记录prompt
+        self.api_handler.record_prompt(prompt)
+        
+        if(len(self.memory["chats"])>1000):
+            logger.info("Memorizing Chats")
+            self.memory["memory"] = self.generate_memory()
+            self.memory["chats"] = ""
+            
+        # 更新memory状态
+        self.api_handler.update_memory(self.memory["memory"])
+        
+        self.chat.append({"role": self.user_role, "content": prompt})
+        language_code = None
+        if isinstance(prompt, tuple):
+            prompt, language_code =  prompt
+            if language_code[-5:] == "-auto":
+                language_code = language_code[:-5]
+        prompt_to_send = f"##你的记忆\n\n{ self.memory['memory'] }\n##之前的对话\n\n{ self.memory['chats'] }\n##你现在需要回答的问题(用{WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}回答.)\n\n{prompt}"
+        self.memory["chats"] += f"USER:{prompt}\n"
+        logger.info(f"Current prompt:{prompt_to_send}")
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": self.init_chat_prompt},
+                {"role": self.user_role, "content": prompt_to_send}
+            ],
+            stream=self.stream
+        )
 
-            self.chat.append({"role": self.user_role, "content": prompt})
-            language_code = None
-            if isinstance(prompt, tuple):
-                prompt, language_code =  prompt
-                if language_code[-5:] == "-auto":
-                    language_code = language_code[:-5]
-            prompt_to_send = f"##你的记忆\n\n{ self.memory['memory'] }\n##之前的对话\n\n{ self.memory['chats'] }\n##你现在需要回答的问题(用{WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}回答.)\n\n{prompt}"
-            self.memory["chats"] += f"USER:{prompt}\n"
-            logger.info(f"Current prompt:{prompt_to_send}")
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": self.init_chat_prompt},
-                    {"role": self.user_role, "content": prompt_to_send}
-                ],
-                stream=self.stream
-            )
-
-
-
-            if self.stream:
-                generated_text, printable_text = "", ""
-                for chunk in response:
-                    new_text = chunk.choices[0].delta.content or ""
-                    generated_text += new_text
-                    printable_text += new_text
-                    sentences = sent_tokenize(printable_text)
-                    if len(sentences) > 1:
-                        yield sentences[0], language_code
-                        printable_text = new_text
-                self.chat.append({"role": "assistant", "content": generated_text})
-                # don't forget last sentence
-                self.memory["chats"] += f"YOU:{generated_text}\n"
-                yield printable_text, language_code
-            else:
-                generated_text = response.choices[0].message.content
-                self.chat.append({"role": "assistant", "content": generated_text})
-                self.memory["chats"] += f"YOU:{generated_text}\n"
-                yield generated_text, language_code
+        if self.stream:
+            generated_text, printable_text = "", ""
+            start_time = datetime.now()
+            for chunk in response:
+                new_text = chunk.choices[0].delta.content or ""
+                generated_text += new_text
+                printable_text += new_text
+                sentences = sent_tokenize(printable_text)
+                if len(sentences) > 1:
+                    yield sentences[0], language_code
+                    printable_text = new_text
+            end_time = datetime.now()
+            self.api_handler.record_response(generated_text, start_time, end_time)
+            self.chat.append({"role": "assistant", "content": generated_text})
+            # don't forget last sentence
+            self.memory["chats"] += f"YOU:{generated_text}\n"
+            yield printable_text, language_code
+        else:
+            start_time = datetime.now()
+            generated_text = response.choices[0].message.content
+            end_time = datetime.now()
+            self.api_handler.record_response(generated_text, start_time, end_time)
+            self.chat.append({"role": "assistant", "content": generated_text})
+            self.memory["chats"] += f"YOU:{generated_text}\n"
+            yield generated_text, language_code
 
