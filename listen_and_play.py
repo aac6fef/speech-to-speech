@@ -4,7 +4,13 @@ from queue import Queue
 from dataclasses import dataclass, field
 import sounddevice as sd
 from transformers import HfArgumentParser
+from flask import Flask, jsonify
+import signal
+import sys
 
+app = Flask(__name__)
+mic_enabled = threading.Event()  # 用于控制麦克风状态
+mic_enabled.set()  # 默认开启
 
 @dataclass
 class ListenAndPlayArguments:
@@ -28,7 +34,15 @@ class ListenAndPlayArguments:
         default=12346,
         metadata={"help": "The network port for receiving data. Default is 12346."},
     )
+    api_port: int = field(
+        default=6000,
+        metadata={"help": "The network port for the REST API. Default is 6000."},
+    )
 
+def signal_handler(signum, frame):
+    print("接收到终止信号，正在关闭...")
+    stop_event.set()
+    sys.exit(0)
 
 def listen_and_play(
     send_rate=16000,
@@ -37,7 +51,15 @@ def listen_and_play(
     host="localhost",
     send_port=12345,
     recv_port=12346,
+    api_port=6000,
 ):
+    global stop_event
+    stop_event = threading.Event()
+    
+    # 设置信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     send_socket.connect((host, send_port))
 
@@ -46,7 +68,6 @@ def listen_and_play(
 
     print("Recording and streaming...")
 
-    stop_event = threading.Event()
     recv_queue = Queue()
     send_queue = Queue()
 
@@ -59,7 +80,7 @@ def listen_and_play(
             outdata[:] = b"\x00" * len(outdata)
 
     def callback_send(indata, frames, time, status):
-        if recv_queue.empty():
+        if recv_queue.empty() and mic_enabled.is_set():  # 只在麦克风启用时发送数据
             data = bytes(indata)
             send_queue.put(data)
 
@@ -106,20 +127,34 @@ def listen_and_play(
         recv_thread = threading.Thread(target=recv, args=(stop_event, recv_queue))
         recv_thread.start()
 
-        input("Press Enter to stop...")
+        # 启动Flask API服务器
+        app.run(host='0.0.0.0', port=api_port)
 
     except KeyboardInterrupt:
         print("Finished streaming.")
 
     finally:
         stop_event.set()
-        # Given that socket::recv is blocking in receive_data_chunk, shut it down to allow the thread to continue.
-        recv_socket.shutdown(socket.SHUT_RDWR)
+        try:
+            recv_socket.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
         recv_thread.join()
         send_thread.join()
         send_socket.close()
         recv_socket.close()
         print("Connection closed.")
+
+
+@app.route('/mic/toggle/<state>', methods=['POST'])
+def toggle_mic(state):
+    if state == 'on':
+        mic_enabled.set()
+        return jsonify({"status": "success", "message": "Microphone enabled"})
+    elif state == 'off':
+        mic_enabled.clear()
+        return jsonify({"status": "success", "message": "Microphone disabled"})
+    return jsonify({"status": "error", "message": "Invalid state"}), 400
 
 
 if __name__ == "__main__":
