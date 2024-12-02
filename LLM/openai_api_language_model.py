@@ -111,7 +111,7 @@ class OpenApiModelHandler(BaseHandler):
                 prompt, language_code =  prompt
                 if language_code[-5:] == "-auto":
                     language_code = language_code[:-5]
-            prompt_to_send = f"##你的记忆\n\n{ self.memory['memory'] }\n##之前的对话\n\n{ self.memory['chats'] }\n##你现在需要回答的问题\n\n{prompt}"
+            prompt_to_send = f"##你的记忆\n\n{ self.memory['memory'] }\n##之前的对话\n\n{ self.memory['chats'] }\n##你现在需要回答的问题(用{WHISPER_LANGUAGE_TO_LLM_LANGUAGE[language_code]}回答.)\n\n{prompt}"
             self.memory["chats"] += f"USER:{prompt}\n"
             logger.info(f"Current prompt:{prompt_to_send}")
             response = self.client.chat.completions.create(
