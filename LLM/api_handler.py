@@ -15,6 +15,7 @@ class APIHandler:
         self.responses = []
         self.current_memory = ""
         self.model_handler = None
+        self.ws_clients = set()
         self.setup_routes()
         
     def setup_routes(self):
@@ -40,22 +41,28 @@ class APIHandler:
             
         @self.sock.route('/ws')
         def ws_handler(ws):
-            while True:
-                try:
+            self.ws_clients.add(ws)
+            try:
+                while True:
                     ws.receive()
-                except:
-                    break
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
+            finally:
+                self.ws_clients.remove(ws)
                     
     def set_model_handler(self, model_handler):
         self.model_handler = model_handler
         
     def broadcast_ws_message(self, message: str):
-        if hasattr(self, '_ws_clients'):
-            for ws in self._ws_clients:
-                try:
-                    ws.send(message)
-                except:
-                    continue
+        disconnected = set()
+        for ws in self.ws_clients:
+            try:
+                ws.send(message)
+            except Exception as e:
+                logger.error(f"Failed to send message: {e}")
+                disconnected.add(ws)
+        
+        self.ws_clients -= disconnected
         
     def start(self):
         threading.Thread(target=self._run_server, daemon=True).start()

@@ -157,12 +157,12 @@ class OpenApiModelHandler(BaseHandler):
             start_time = datetime.now()
             for chunk in response:
                 new_text = chunk.choices[0].delta.content or ""
+                if new_text:  # 只要有新内容就立即发送
+                    self.api_handler.broadcast_ws_message(new_text)
                 generated_text += new_text
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
-                    # 使用APIHandler的广播功能
-                    self.api_handler.broadcast_ws_message(sentences[0])
                     yield sentences[0], language_code
                     printable_text = new_text
             end_time = datetime.now()
