@@ -1,10 +1,12 @@
 import logging
 import time
 from datetime import datetime
+import asyncio
 
 from nltk import sent_tokenize
 from rich.console import Console
 from openai import OpenAI
+from fastapi import WebSocket
 
 from baseHandler import BaseHandler
 from LLM.chat import Chat
@@ -56,7 +58,9 @@ class OpenApiModelHandler(BaseHandler):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.warmup()
         self.api_handler = APIHandler(port=api_port)
+        self.api_handler.set_model_handler(self)
         self.api_handler.start()
+        self.active_connections = set()  # 存储活跃的WebSocket连接
 
     def warmup(self):
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -99,6 +103,23 @@ class OpenApiModelHandler(BaseHandler):
         compressed_memory = response.choices[0].message.content.strip()
         return compressed_memory
 
+    async def connect_websocket(self, websocket: WebSocket):
+        """处理新的WebSocket连接"""
+        await websocket.accept()
+        self.active_connections.add(websocket)
+        
+    def disconnect_websocket(self, websocket: WebSocket):
+        """处理WebSocket断开连接"""
+        self.active_connections.remove(websocket)
+        
+    async def broadcast_message(self, message: str):
+        """向所有连接的客户端广播消息"""
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except:
+                self.active_connections.remove(connection)
+
     def process(self, prompt):
         logger.debug("call api language model...")
         
@@ -140,6 +161,8 @@ class OpenApiModelHandler(BaseHandler):
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
                 if len(sentences) > 1:
+                    # 使用APIHandler的广播功能
+                    self.api_handler.broadcast_ws_message(sentences[0])
                     yield sentences[0], language_code
                     printable_text = new_text
             end_time = datetime.now()
