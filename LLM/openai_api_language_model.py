@@ -157,8 +157,8 @@ class OpenApiModelHandler(BaseHandler):
             start_time = datetime.now()
             for chunk in response:
                 new_text = chunk.choices[0].delta.content or ""
-                if new_text:  # 只要有新内容就立即发送
-                    self.api_handler.broadcast_ws_message(new_text)
+                if new_text:
+                    self.api_handler.broadcast_ws_message(new_text)  # 立即发送新内容
                 generated_text += new_text
                 printable_text += new_text
                 sentences = sent_tokenize(printable_text)
@@ -168,7 +168,6 @@ class OpenApiModelHandler(BaseHandler):
             end_time = datetime.now()
             self.api_handler.record_response(generated_text, start_time, end_time)
             self.chat.append({"role": "assistant", "content": generated_text})
-            # don't forget last sentence
             self.memory["chats"] += f"YOU:{generated_text}\n"
             yield printable_text, language_code
         else:
